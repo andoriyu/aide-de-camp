@@ -16,3 +16,15 @@ aide-de-camp-sqlite/sqlite.db
 
 Cargo.lock
 .pre-commit-config.yaml
+.sqlx/
+
+# devenv
+.devenv/
+.devenv.flake.nix
+
+# Claude Code
+.claude/
+
+# Test databases
+**/*.db
+*.db

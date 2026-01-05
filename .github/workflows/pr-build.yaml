@@ -24,13 +24,13 @@ jobs:
         with:
           filters: |
             aide-de-camp:
-              - 'aide-de-camp-sqlite/**'
+              - 'aide-de-camp/**'
             aide-de-camp-sqlite:
               - 'aide-de-camp-sqlite/**'
+            aide-de-camp-postgres:
+              - 'aide-de-camp-postgres/**'
   code-style:
     runs-on: ubuntu-latest
-    env:
-      SQLX_OFFLINE: true
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -50,13 +50,32 @@ jobs:
         project: ${{ fromJSON(needs.changes.outputs.packages) }}
       fail-fast: false
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aide_de_camp_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     env:
-      SQLX_OFFLINE: true
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aide_de_camp_test
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
+      - name: Run migrations (PostgreSQL only)
+        if: matrix.project == 'aide-de-camp-postgres'
+        working-directory: ${{matrix.project}}
+        run: |
+          cargo install sqlx-cli --no-default-features --features postgres
+          sqlx migrate run
       - name: Test Rust
         working-directory: ${{matrix.project}}
         run: cargo nextest run --profile ci

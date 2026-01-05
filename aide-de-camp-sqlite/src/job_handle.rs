@@ -31,7 +31,8 @@ impl JobHandle for SqliteJobHandle {
 
     async fn complete(mut self) -> Result<(), QueueError> {
         let jid = self.row.jid.to_string();
-        sqlx::query!("DELETE FROM adc_queue where jid = ?1", jid)
+        sqlx::query("DELETE FROM adc_queue where jid = ?1")
+            .bind(jid)
             .execute(&self.pool)
             .await
             .context("Failed to mark job as completed")?;
@@ -40,7 +41,8 @@ impl JobHandle for SqliteJobHandle {
 
     async fn fail(mut self) -> Result<(), QueueError> {
         let jid = self.row.jid.to_string();
-        sqlx::query!("UPDATE adc_queue SET started_at=null WHERE jid = ?1", jid)
+        sqlx::query("UPDATE adc_queue SET started_at=null, retries=retries+1 WHERE jid = ?1")
+            .bind(jid)
             .execute(&self.pool)
             .await
             .context("Failed to mark job as failed")?;
@@ -60,18 +62,19 @@ impl JobHandle for SqliteJobHandle {
             .begin()
             .await
             .context("Failed to start transaction")?;
-        sqlx::query!("DELETE FROM adc_queue WHERE jid = ?1", jid)
+        sqlx::query("DELETE FROM adc_queue WHERE jid = ?1")
+            .bind(&jid)
             .execute(&mut *tx)
             .await
             .context("Failed to delete job from the queue")?;
 
-        sqlx::query!("INSERT INTO adc_dead_queue (jid, job_type, payload, retries, scheduled_at, enqueued_at) VALUES (?1, ?2, ?3, ?4,?5,?6)",
-            jid,
-            job_type,
-            payload,
-            retries,
-            scheduled_at,
-            enqueued_at)
+        sqlx::query("INSERT INTO adc_dead_queue (jid, job_type, payload, retries, scheduled_at, enqueued_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+            .bind(jid)
+            .bind(job_type)
+            .bind(payload)
+            .bind(retries)
+            .bind(scheduled_at)
+            .bind(enqueued_at)
             .execute(&mut *tx).await
             .context("Failed to move job to dead queue")?;
         tx.commit().await.context("Failed to commit transaction")?;
