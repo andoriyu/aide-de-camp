@@ -193,7 +193,8 @@ mod test {
         }
 
         fn payload(&self) -> Bytes {
-            Bytes::new()
+            // () serializes to "null" in JSON
+            serde_json::to_vec(&()).unwrap().into()
         }
 
         fn retries(&self) -> u32 {
