@@ -26,6 +26,20 @@
     components = ["rustc" "cargo" "clippy" "rustfmt" "rust-src"];
   };
 
+  services.postgres = {
+    enable = true;
+    listen_addresses = ""; # Unix socket only
+    initialDatabases = [
+      { name = "aide_de_camp_dev"; }
+    ];
+    initialScript = ''
+      CREATE USER aide_de_camp WITH PASSWORD 'aide_de_camp';
+      GRANT ALL PRIVILEGES ON DATABASE aide_de_camp_dev TO aide_de_camp;
+      \c aide_de_camp_dev
+      GRANT ALL ON SCHEMA public TO aide_de_camp;
+    '';
+  };
+
   git-hooks.hooks = {
     rustfmt.enable = true;
     clippy = {
@@ -37,5 +51,6 @@
 
   enterShell = ''
     echo "aide-de-camp development environment"
+    export DATABASE_URL="postgresql:///aide_de_camp_dev?host=$PGHOST"
   '';
 }

@@ -16,3 +16,4 @@ aide-de-camp-sqlite/sqlite.db
 
 Cargo.lock
 .pre-commit-config.yaml
+.sqlx/
