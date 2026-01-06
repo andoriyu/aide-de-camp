@@ -5,6 +5,7 @@ pub mod core;
 /// Default implementation of job runner.
 #[cfg(feature = "runner")]
 pub mod runner {
+    pub mod cron_scheduler;
     pub mod job_router;
     pub mod job_runner;
     pub mod wrapped_job;

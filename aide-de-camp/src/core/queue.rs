@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::core::job_handle::JobHandle;
 use crate::core::job_processor::JobProcessor;
-use crate::core::{DateTime, Duration, Xid};
+use crate::core::{Bytes, DateTime, Duration, Xid};
 
 /// An interface to queue implementation. Responsible for pushing jobs into the queue and pulling
 /// jobs out of the queue.
@@ -49,6 +49,30 @@ pub trait Queue: Send + Sync {
         let when = Utc::now() + scheduled_in;
         self.schedule_at::<J>(payload, when, priority).await
     }
+
+    /// Schedule a job with raw, pre-serialized payload.
+    ///
+    /// This is used internally by the cron scheduler to enqueue jobs without
+    /// compile-time type information. Most users should use `schedule`, `schedule_at`,
+    /// or `schedule_in` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `job_type` - The job type identifier (typically the type name)
+    /// * `payload` - Pre-serialized job payload as bytes
+    /// * `scheduled_at` - When the job should be eligible to run
+    /// * `priority` - Job priority (higher values run first)
+    ///
+    /// # Returns
+    ///
+    /// The job ID (Xid) of the scheduled job
+    async fn schedule_raw(
+        &self,
+        job_type: &str,
+        payload: Bytes,
+        scheduled_at: DateTime,
+        priority: i8,
+    ) -> Result<Xid, QueueError>;
 
     /// Pool queue, implementation should not wait for next job, if there nothing return `Ok(None)`.
     async fn poll_next_with_instant(

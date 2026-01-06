@@ -1,0 +1,27 @@
+[package]
+name = "electorate"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/andoriyu/aide-de-camp"
+documentation = "https://docs.rs/electorate"
+description = "Leader election abstraction for distributed systems"
+keywords = ["distributed", "leader-election", "consensus", "high-availability"]
+authors = ["Andrey Snow <andoriyu@gmail.com>"]
+
+[dependencies]
+async-trait = "0.1"
+thiserror = "1.0"
+tracing = "0.1"
+anyhow = "1.0"
+
+# Optional dependencies for PostgreSQL
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"], optional = true }
+tokio = { version = "1", features = ["time"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = []
+postgres = ["sqlx", "tokio"]

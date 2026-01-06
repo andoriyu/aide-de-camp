@@ -4,5 +4,6 @@ members = [
   "aide-de-camp-sqlite-bench",
   "aide-de-camp-postgres",
   "aide-de-camp",
+  "electorate",
 ]
 resolver = "2"

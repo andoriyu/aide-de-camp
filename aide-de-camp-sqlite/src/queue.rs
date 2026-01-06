@@ -2,7 +2,7 @@ use crate::job_handle::SqliteJobHandle;
 use crate::types::JobRow;
 use aide_de_camp::core::job_processor::JobProcessor;
 use aide_de_camp::core::queue::{Queue, QueueError};
-use aide_de_camp::core::{new_xid, DateTime, Xid};
+use aide_de_camp::core::{new_xid, Bytes, DateTime, Xid};
 use anyhow::Context;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use tracing::instrument;
 /// An implementation of the Queue backed by SQlite
 #[derive(Clone)]
 pub struct SqliteQueue {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 impl SqliteQueue {
@@ -49,6 +49,34 @@ impl Queue for SqliteQueue {
         .bind(jid_string)
         .bind(job_type)
         .bind(payload)
+        .bind(scheduled_at)
+        .bind(priority)
+        .execute(&self.pool)
+        .await
+        .context("Failed to add job to the queue")?;
+        Ok(jid)
+    }
+
+    #[instrument(skip_all, err, ret, fields(job_type, payload_size))]
+    async fn schedule_raw(
+        &self,
+        job_type: &str,
+        payload: Bytes,
+        scheduled_at: DateTime,
+        priority: i8,
+    ) -> Result<Xid, QueueError> {
+        let jid = new_xid();
+        let jid_string = jid.to_string();
+
+        tracing::Span::current().record("job_type", job_type);
+        tracing::Span::current().record("payload_size", payload.len());
+
+        sqlx::query(
+            "INSERT INTO adc_queue (jid,job_type,payload,scheduled_at,priority) VALUES (?1,?2,?3,?4,?5)"
+        )
+        .bind(jid_string)
+        .bind(job_type)
+        .bind(payload.as_ref())
         .bind(scheduled_at)
         .bind(priority)
         .execute(&self.pool)

@@ -1,5 +1,6 @@
 //! PostgreSQL implementation of the Queue trait from aide-de-camp
 
+pub mod cron_queue;
 pub mod job_handle;
 pub mod queue;
 pub mod types;

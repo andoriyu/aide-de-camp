@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod cron_queue;
 pub mod job_handle;
 pub mod queue;
 pub mod types;
