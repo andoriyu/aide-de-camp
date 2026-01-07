@@ -308,14 +308,11 @@ struct CronJobRow {
 
 impl From<CronJobRow> for CronJob {
     fn from(row: CronJobRow) -> Self {
-        // Convert JSONB to bytes
-        let payload_bytes = serde_json::to_vec(&row.payload).unwrap_or_default();
-
         CronJob {
             cron_id: row.cron_id,
             queue: row.queue,
             job_type: row.job_type,
-            payload: payload_bytes,
+            payload: row.payload,
             cron_expression: row.cron_expression,
             priority: row.priority as i8,
             created_at: timestamp_to_datetime(row.created_at),

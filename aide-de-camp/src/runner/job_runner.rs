@@ -240,6 +240,16 @@ mod test {
             Ok(xid::new())
         }
 
+        async fn schedule_raw(
+            &self,
+            _job_type: &str,
+            _payload: serde_json::Value,
+            _scheduled_at: DateTime,
+            _priority: i8,
+        ) -> Result<Xid, QueueError> {
+            Ok(xid::new())
+        }
+
         async fn poll_next_with_instant(
             &self,
             _job_types: &[&str],

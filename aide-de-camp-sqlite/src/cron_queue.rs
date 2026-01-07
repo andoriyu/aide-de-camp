@@ -309,11 +309,14 @@ struct CronJobRow {
 
 impl From<CronJobRow> for CronJob {
     fn from(row: CronJobRow) -> Self {
+        // Deserialize bytes to JSON value
+        let payload = serde_json::from_slice(&row.payload).unwrap_or(serde_json::Value::Null);
+
         CronJob {
             cron_id: row.cron_id,
             queue: row.queue,
             job_type: row.job_type,
-            payload: row.payload,
+            payload,
             cron_expression: row.cron_expression,
             priority: row.priority,
             created_at: timestamp_to_datetime(row.created_at),

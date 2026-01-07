@@ -24,8 +24,8 @@ pub struct CronJob {
     /// Job type identifier
     pub job_type: String,
 
-    /// Serialized job payload
-    pub payload: Vec<u8>,
+    /// Job payload as JSON
+    pub payload: serde_json::Value,
 
     /// Cron expression (e.g., "0 0 * * *")
     pub cron_expression: String,

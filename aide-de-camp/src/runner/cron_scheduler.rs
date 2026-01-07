@@ -7,7 +7,7 @@
 use crate::core::cron::CronSchedule;
 use crate::core::cron_queue::{CronJob, CronQueue};
 use crate::core::queue::Queue;
-use crate::core::{Bytes, Utc};
+use crate::core::Utc;
 use anyhow::Context;
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -211,10 +211,14 @@ where
         }
 
         // Enqueue the job using schedule_raw
-        let payload = Bytes::from(cron_job.payload.clone());
         let jid = self
             .queue
-            .schedule_raw(&cron_job.job_type, payload, Utc::now(), cron_job.priority)
+            .schedule_raw(
+                &cron_job.job_type,
+                cron_job.payload.clone(),
+                Utc::now(),
+                cron_job.priority,
+            )
             .await
             .context("Failed to enqueue cron job")?;
 

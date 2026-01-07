@@ -157,7 +157,7 @@ impl CronSchedule {
 mod tests {
     use super::*;
     use crate::core::Utc;
-    use chrono::TimeZone;
+    use chrono::{Datelike, TimeZone, Timelike};
 
     #[test]
     fn test_parse_valid_cron() {

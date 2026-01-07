@@ -2,7 +2,7 @@ use crate::job_handle::PostgresJobHandle;
 use crate::types::JobRow;
 use aide_de_camp::core::job_processor::JobProcessor;
 use aide_de_camp::core::queue::{Queue, QueueError};
-use aide_de_camp::core::{new_xid, Bytes, DateTime, Xid};
+use aide_de_camp::core::{new_xid, DateTime, Xid};
 use anyhow::Context;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,7 @@ impl Queue for PostgresQueue {
     async fn schedule_raw(
         &self,
         job_type: &str,
-        payload: Bytes,
+        payload: serde_json::Value,
         scheduled_at: DateTime,
         priority: i8,
     ) -> Result<Xid, QueueError> {
@@ -72,19 +72,14 @@ impl Queue for PostgresQueue {
         let scheduled_at_ts = scheduled_at.timestamp();
         let priority_i16 = priority as i16;
 
-        // Convert Bytes to serde_json::Value for JSONB storage
-        let payload_value: serde_json::Value =
-            serde_json::from_slice(&payload).map_err(QueueError::DeserializeError)?;
-
         tracing::Span::current().record("job_type", job_type);
-        tracing::Span::current().record("payload_size", payload.len());
 
         sqlx::query(
             "INSERT INTO adc_queue (jid,job_type,payload,scheduled_at,priority) VALUES ($1,$2,$3,$4,$5)"
         )
         .bind(jid_string)
         .bind(job_type)
-        .bind(payload_value)
+        .bind(payload)
         .bind(scheduled_at_ts)
         .bind(priority_i16)
         .execute(&self.pool)

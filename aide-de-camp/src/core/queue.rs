@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::core::job_handle::JobHandle;
 use crate::core::job_processor::JobProcessor;
-use crate::core::{Bytes, DateTime, Duration, Xid};
+use crate::core::{DateTime, Duration, Xid};
 
 /// An interface to queue implementation. Responsible for pushing jobs into the queue and pulling
 /// jobs out of the queue.
@@ -50,7 +50,7 @@ pub trait Queue: Send + Sync {
         self.schedule_at::<J>(payload, when, priority).await
     }
 
-    /// Schedule a job with raw, pre-serialized payload.
+    /// Schedule a job with raw JSON payload.
     ///
     /// This is used internally by the cron scheduler to enqueue jobs without
     /// compile-time type information. Most users should use `schedule`, `schedule_at`,
@@ -59,7 +59,7 @@ pub trait Queue: Send + Sync {
     /// # Arguments
     ///
     /// * `job_type` - The job type identifier (typically the type name)
-    /// * `payload` - Pre-serialized job payload as bytes
+    /// * `payload` - Job payload as JSON value
     /// * `scheduled_at` - When the job should be eligible to run
     /// * `priority` - Job priority (higher values run first)
     ///
@@ -69,7 +69,7 @@ pub trait Queue: Send + Sync {
     async fn schedule_raw(
         &self,
         job_type: &str,
-        payload: Bytes,
+        payload: serde_json::Value,
         scheduled_at: DateTime,
         priority: i8,
     ) -> Result<Xid, QueueError>;
