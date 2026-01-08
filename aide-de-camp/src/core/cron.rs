@@ -35,22 +35,38 @@ use crate::core::DateTime;
 use cron::Schedule;
 use std::str::FromStr;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Error type for cron-related operations.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum CronError {
-    /// Failed to parse cron expression
-    #[error("Invalid cron expression: {0}")]
-    ParseError(String),
+    /// Failed to parse cron expression with context.
+    #[error("Invalid cron expression '{expression}': {error}")]
+    ParseError { expression: String, error: String },
 
-    /// No upcoming execution time could be calculated
-    #[error("No upcoming execution time for cron expression")]
-    NoUpcomingExecution,
+    /// No upcoming execution time could be calculated.
+    #[error("No upcoming execution for cron expression '{0}'")]
+    NoUpcomingExecution(String),
 
-    /// Database or other error
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    /// Cron job not found.
+    #[error("Cron job {cron_id} not found{}", expected_type.as_ref().map(|t| format!(" (expected type: '{}')", t)).unwrap_or_default())]
+    CronNotFound {
+        cron_id: Uuid,
+        expected_type: Option<String>,
+    },
+
+    /// Type mismatch when retrieving cron job.
+    #[error("Cron job {cron_id} has type '{actual_type}' but expected '{expected_type}'")]
+    TypeMismatch {
+        cron_id: Uuid,
+        actual_type: String,
+        expected_type: String,
+    },
+
+    /// Database or other error.
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] anyhow::Error),
 }
 
 /// A parsed cron schedule that can calculate next execution times.
@@ -85,8 +101,10 @@ impl CronSchedule {
     /// let schedule = CronSchedule::parse("0 9 * * 1-5").unwrap();
     /// ```
     pub fn parse(expression: &str) -> Result<Self, CronError> {
-        let schedule = Schedule::from_str(expression)
-            .map_err(|e| CronError::ParseError(format!("{}: {}", expression, e)))?;
+        let schedule = Schedule::from_str(expression).map_err(|e| CronError::ParseError {
+            expression: expression.to_string(),
+            error: e.to_string(),
+        })?;
 
         Ok(Self {
             schedule,
@@ -161,8 +179,8 @@ mod tests {
 
     #[test]
     fn test_parse_valid_cron() {
-        let schedule = CronSchedule::parse("0 0 * * *").unwrap();
-        assert_eq!(schedule.expression(), "0 0 * * *");
+        let schedule = CronSchedule::parse("0 0 0 * * *").unwrap();
+        assert_eq!(schedule.expression(), "0 0 0 * * *");
     }
 
     #[test]
@@ -173,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_next_after() {
-        let schedule = CronSchedule::parse("0 0 * * *").unwrap();
+        let schedule = CronSchedule::parse("0 0 0 * * *").unwrap();
 
         // Test from a specific time: Jan 1, 2024 at 12:00 PM
         let start = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
@@ -183,23 +201,25 @@ mod tests {
         assert_eq!(next.day(), 2);
         assert_eq!(next.hour(), 0);
         assert_eq!(next.minute(), 0);
+        assert_eq!(next.second(), 0);
     }
 
     #[test]
     fn test_every_15_minutes() {
-        let schedule = CronSchedule::parse("*/15 * * * *").unwrap();
+        let schedule = CronSchedule::parse("0 */15 * * * *").unwrap();
 
         let start = Utc.with_ymd_and_hms(2024, 1, 1, 12, 7, 30).unwrap();
         let next = schedule.next_after(start).unwrap();
 
-        // Next should be 12:15
+        // Next should be 12:15:00
         assert_eq!(next.hour(), 12);
         assert_eq!(next.minute(), 15);
+        assert_eq!(next.second(), 0);
     }
 
     #[test]
     fn test_next_from_now() {
-        let schedule = CronSchedule::parse("0 0 * * *").unwrap();
+        let schedule = CronSchedule::parse("0 0 0 * * *").unwrap();
         let next = schedule.next_from_now();
 
         assert!(next.is_some());

@@ -1,6 +1,6 @@
 use aide_de_camp::core::job_processor::{JobError, JobProcessor};
-use aide_de_camp::core::queue::Queue;
-use aide_de_camp::core::{CancellationToken, Xid};
+use aide_de_camp::core::queue::{Queue, ScheduleOptions};
+use aide_de_camp::core::CancellationToken;
 use aide_de_camp::core::{Duration, Utc};
 use aide_de_camp::prelude::RunnerOptions;
 use aide_de_camp::runner::job_router::RunnerRouter;
@@ -18,10 +18,11 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use uuid::Uuid;
 
 struct JobResult {
     pub duration_millis: i64,
-    pub jid: Xid,
+    pub jid: Uuid,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,6 +43,12 @@ struct BenchJob {
     count: Arc<AtomicUsize>,
 }
 
+impl aide_de_camp::core::job_type_id::JobTypeId for BenchJob {
+    fn type_name() -> &'static str {
+        "aide_de_camp_sqlite_bench::BenchJob"
+    }
+}
+
 #[async_trait]
 impl JobProcessor for BenchJob {
     type Payload = BenchJobPayload;
@@ -49,7 +56,7 @@ impl JobProcessor for BenchJob {
 
     async fn handle(
         &self,
-        jid: Xid,
+        jid: Uuid,
         payload: Self::Payload,
         _cancellation_token: CancellationToken,
     ) -> Result<(), Self::Error> {
@@ -60,15 +67,8 @@ impl JobProcessor for BenchJob {
                 duration_millis,
                 jid,
             })
-            .map_err(|_| anyhow!("Failed to send results"))?;
+            .map_err(|e| JobError::HandlerError(anyhow!("Failed to send results: {}", e)))?;
         Ok(())
-    }
-
-    fn name() -> &'static str
-    where
-        Self: Sized,
-    {
-        "bench_job"
     }
 }
 
@@ -82,7 +82,7 @@ async fn schedule_tasks(count: usize, interval: std::time::Duration, queue: Arc<
     for _ in 0..count {
         delay.tick().await;
         if let Err(e) = queue
-            .schedule::<BenchJob>(BenchJobPayload::default(), 0)
+            .schedule::<BenchJob>(BenchJobPayload::default(), ScheduleOptions::now())
             .await
         {
             eprintln!("Failed to schedule job: {}", e);
@@ -142,7 +142,7 @@ async fn main() {
 
     let mut results = rx.take(count).collect::<Vec<JobResult>>().await;
 
-    let seen_ids = { results.iter().map(|r| r.jid).collect::<HashSet<Xid>>() };
+    let seen_ids = { results.iter().map(|r| r.jid).collect::<HashSet<Uuid>>() };
 
     if seen_ids.len() < results.len() {
         eprintln!("Got some duplicates yo");

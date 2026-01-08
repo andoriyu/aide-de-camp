@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["time"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "macros", "migrate"] }
 
 [features]
 default = []

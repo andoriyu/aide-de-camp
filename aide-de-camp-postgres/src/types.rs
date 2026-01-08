@@ -1,29 +1,44 @@
-use aide_de_camp::core::Xid;
 use bytes::Bytes;
 use sqlx::FromRow;
-use std::str::FromStr;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
 pub(crate) struct JobRow {
-    pub(crate) jid: String,
-    pub(crate) job_type: String,
+    pub(crate) jid: Uuid,
+    pub(crate) type_hash: i64,
+    pub(crate) type_name: String,
     pub(crate) payload: sqlx::types::JsonValue,
     pub(crate) retries: i32,
-    /// Timestamp when the job is scheduled to run (not directly accessed - used in SQL SELECT)
+    // Priority is used in SQL ORDER BY, not accessed in Rust after polling
     #[allow(dead_code)]
-    pub(crate) scheduled_at: i64,
-    /// Timestamp when the job was enqueued (not directly accessed - used in SQL SELECT)
-    #[allow(dead_code)]
-    pub(crate) enqueued_at: i64,
+    pub(crate) priority: i16,
 }
 
 impl JobRow {
-    pub(crate) fn into_payload(self) -> Bytes {
-        // Convert JsonValue back to JSON bytes
-        serde_json::to_vec(&self.payload).unwrap().into()
+    /// Convert UUID to match trait signature
+    pub(crate) fn id(&self) -> Uuid {
+        self.jid
     }
 
-    pub(crate) fn jid(&self) -> Xid {
-        Xid::from_str(&self.jid).expect("Invalid XID in database")
+    /// Convert i64 to u64 for type hash
+    pub(crate) fn type_hash(&self) -> u64 {
+        self.type_hash as u64
+    }
+
+    /// Get type name reference
+    pub(crate) fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    /// Convert JsonValue to Bytes for JobHandle
+    pub(crate) fn payload_bytes(&self) -> Bytes {
+        serde_json::to_vec(&self.payload)
+            .expect("Failed to serialize payload")
+            .into()
+    }
+
+    /// Get retry count as u32
+    pub(crate) fn retries(&self) -> u32 {
+        self.retries as u32
     }
 }

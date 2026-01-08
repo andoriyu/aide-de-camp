@@ -1,7 +1,8 @@
 use super::wrapped_job::{BoxedJobHandler, WrappedJobHandler};
-use crate::core::job_handle::JobHandle;
+use crate::core::job_handle::{ErrorContext, JobHandle};
 use crate::core::job_processor::{JobError, JobProcessor};
 use crate::core::queue::{Queue, QueueError};
+use crate::core::Utc;
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -54,36 +55,37 @@ use tracing::instrument;
 ///```
 #[derive(Default)]
 pub struct RunnerRouter {
-    jobs: HashMap<&'static str, BoxedJobHandler>,
+    jobs: HashMap<u64, BoxedJobHandler>,
 }
 
 impl RunnerRouter {
-    /// Register a job handler with the router. If job by that name already present, it will get replaced.
+    /// Register a job handler with the router. If job by that type already present, it will get replaced.
     pub fn add_job_handler<J>(&mut self, job: J)
     where
         J: JobProcessor + 'static,
         J::Payload: for<'de> Deserialize<'de> + Serialize,
         J::Error: Into<JobError>,
     {
-        let name = J::name();
+        let type_hash = J::type_hash();
         let boxed = WrappedJobHandler::new(job).boxed();
-        self.jobs.entry(name).or_insert(boxed);
+        self.jobs.entry(type_hash).or_insert(boxed);
     }
 
-    pub fn types(&self) -> Vec<&'static str> {
+    pub fn type_hashes(&self) -> Vec<u64> {
         self.jobs.keys().copied().collect()
     }
 
     /// Process job handle. This function reposible for job lifecycle. If you're implementing your
     /// own job runner, then this is what you should use to process job that is already pulled
     /// from the queue. In all other cases, you shouldn't use this function directly.
-    #[instrument(skip_all, err, fields(job_type = %job_handle.job_type(), jid = %job_handle.id().to_string(), retries = job_handle.retries()))]
+    #[instrument(skip_all, err, fields(job_type = %job_handle.type_name(), jid = %job_handle.id().to_string(), retries = job_handle.retries()))]
     pub async fn process<H: JobHandle>(
         &self,
         job_handle: H,
         cancellation_token: CancellationToken,
     ) -> Result<(), RunnerError> {
-        if let Some(r) = self.jobs.get(job_handle.job_type()) {
+        let type_hash = job_handle.type_hash();
+        if let Some(r) = self.jobs.get(&type_hash) {
             let job_shutdown_timeout = r.shutdown_timeout();
 
             let job_result = tokio::select! {
@@ -102,14 +104,15 @@ impl RunnerRouter {
             )
             .await
         } else {
-            Err(RunnerError::UnknownJobType(
-                job_handle.job_type().to_string(),
-            ))
+            Err(RunnerError::UnknownJobType {
+                type_name: job_handle.type_name().to_string(),
+                type_hash,
+            })
         }
     }
 
-    /// In a loop, poll the queue with interval (passes interval to `Queue::next`) and process
-    /// incoming jobs. Function process jobs one-by-one without job-level concurrency. If you need
+    /// In a loop, poll the queue with interval and process incoming jobs.
+    /// Function process jobs one-by-one without job-level concurrency. If you need
     /// concurrency, look at the `JobRunner` instead.
     pub async fn listen<Q, QR>(
         &self,
@@ -120,12 +123,26 @@ impl RunnerRouter {
         Q: AsRef<QR>,
         QR: Queue,
     {
-        let job_types = self.types();
+        let type_hashes = self.type_hashes();
+        let mut interval = tokio::time::interval(poll_interval.to_std().unwrap());
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
-                next = queue.as_ref().next(&job_types, poll_interval) => {
-                    let cancellation_token = cancellation_token.child_token();
-                    self.handle_next_job::<QR>(next, cancellation_token).await;
+                _ = interval.tick() => {
+                    let now = Utc::now();
+                    match queue.as_ref().poll_next(&type_hashes, now).await {
+                        Ok(Some(job_handle)) => {
+                            let cancellation_token = cancellation_token.child_token();
+                            self.handle_next_job_result::<QR>(Ok(job_handle), cancellation_token).await;
+                        }
+                        Ok(None) => {
+                            // No jobs available
+                        }
+                        Err(e) => {
+                            self.handle_next_job_result::<QR>(Err(e), cancellation_token.child_token()).await;
+                        }
+                    }
                 }
                 _ = cancellation_token.cancelled() => {
                     // If cancellation is requested while a job is processing, this block will execute on the next iteration.
@@ -136,7 +153,7 @@ impl RunnerRouter {
         }
     }
 
-    async fn handle_next_job<QR>(
+    async fn handle_next_job_result<QR>(
         &self,
         next: Result<QR::JobHandle, QueueError>,
         cancellation_token: CancellationToken,
@@ -148,8 +165,11 @@ impl RunnerRouter {
                 match self.process(handle, cancellation_token.child_token()).await {
                     Ok(_) => {}
                     Err(RunnerError::QueueError(e)) => handle_queue_error(e).await,
-                    Err(RunnerError::UnknownJobType(name)) => {
-                        tracing::error!("Unknown job type: {}", name)
+                    Err(RunnerError::UnknownJobType {
+                        type_name,
+                        type_hash,
+                    }) => {
+                        tracing::error!("Unknown job type: {} (hash: {})", type_name, type_hash)
                     }
                 };
             }
@@ -163,8 +183,8 @@ impl RunnerRouter {
 /// Errors returned by the router.
 #[derive(Error, Debug)]
 pub enum RunnerError {
-    #[error("Runner is not configured to run this job type: {0}")]
-    UnknownJobType(String),
+    #[error("Runner is not configured to run job type '{type_name}' (hash: {type_hash})")]
+    UnknownJobType { type_name: String, type_hash: u64 },
     #[error(transparent)]
     QueueError(#[from] QueueError),
 }
@@ -198,7 +218,21 @@ async fn handle_job_result<H: JobHandle>(
             tracing::error!("Error during job processing: {}", e);
             if job_handle.retries() >= max_retries {
                 tracing::warn!("Moving job {} to dead queue", job_handle.id().to_string());
-                job_handle.dead_queue().await?;
+
+                // Create error context
+                let error_context = ErrorContext {
+                    error_message: e.to_string(),
+                    error_type: match e {
+                        JobError::Deserialization { .. } => "deserialization".to_string(),
+                        JobError::ShutdownTimeout(_) => "shutdown_timeout".to_string(),
+                        JobError::HandlerError(_) => "handler_error".to_string(),
+                    },
+                    retry_count: job_handle.retries(),
+                    last_error_at: Utc::now(),
+                    metadata: HashMap::new(),
+                };
+
+                job_handle.dead_queue(Some(error_context)).await?;
                 Ok(())
             } else {
                 job_handle.fail().await?;
@@ -217,12 +251,19 @@ async fn handle_queue_error(error: QueueError) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::core::Xid;
+    use crate::core::job_type_id::JobTypeId;
     use std::convert::Infallible;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn it_is_object_safe_and_wrappable() {
         struct Example;
+
+        impl JobTypeId for Example {
+            fn type_name() -> &'static str {
+                "test::Example"
+            }
+        }
 
         #[async_trait::async_trait]
         impl JobProcessor for Example {
@@ -231,15 +272,12 @@ mod test {
 
             async fn handle(
                 &self,
-                _jid: Xid,
+                _jid: Uuid,
                 _payload: Self::Payload,
                 _cancellation_token: CancellationToken,
             ) -> Result<(), Infallible> {
                 dbg!("we did it patrick");
                 Ok(())
-            }
-            fn name() -> &'static str {
-                "example"
             }
         }
 
@@ -247,7 +285,7 @@ mod test {
 
         let job: Box<dyn JobProcessor<Payload = _, Error = _>> = Box::new(Example);
 
-        job.handle(xid::new(), payload.clone(), CancellationToken::new())
+        job.handle(Uuid::now_v7(), payload.clone(), CancellationToken::new())
             .await
             .unwrap();
         let wrapped: Box<dyn JobProcessor<Payload = _, Error = JobError>> =
@@ -256,7 +294,7 @@ mod test {
         let payload = serde_json::to_vec(&payload).unwrap();
 
         wrapped
-            .handle(xid::new(), payload.into(), CancellationToken::new())
+            .handle(Uuid::now_v7(), payload.into(), CancellationToken::new())
             .await
             .unwrap();
     }

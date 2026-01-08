@@ -4,6 +4,7 @@
     pkgs.cargo-cache
     pkgs.cargo-deny
     pkgs.cargo-diet
+    pkgs.cargo-llvm-cov
     pkgs.cargo-nextest
     pkgs.cargo-outdated
     pkgs.cargo-sort
@@ -23,7 +24,7 @@
   languages.rust = {
     enable = true;
     channel = "stable";
-    components = ["rustc" "cargo" "clippy" "rustfmt" "rust-src"];
+    components = ["rustc" "cargo" "clippy" "rustfmt" "rust-src" "llvm-tools-preview"];
   };
 
   services.postgres = {

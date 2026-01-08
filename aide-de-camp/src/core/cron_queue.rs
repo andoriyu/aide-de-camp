@@ -15,14 +15,17 @@ use serde::{Deserialize, Serialize};
 /// enqueued when its execution time arrives.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
-    /// Unique identifier for this cron job
+    /// Unique identifier for this cron job (UUIDv7)
     pub cron_id: String,
 
     /// Queue name (e.g., "default")
     pub queue: String,
 
-    /// Job type identifier
-    pub job_type: String,
+    /// Job type hash for routing
+    pub type_hash: u64,
+
+    /// Job type name for debugging
+    pub type_name: String,
 
     /// Job payload as JSON
     pub payload: serde_json::Value,
@@ -242,4 +245,274 @@ pub trait CronQueue: Send + Sync {
         cron_id: &str,
         next_execution_at: DateTime,
     ) -> Result<(), CronError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_cron_error_parse_error_formatting() {
+        let error = CronError::ParseError {
+            expression: "invalid cron".to_string(),
+            error: "Expected 6 fields".to_string(),
+        };
+
+        let error_msg = error.to_string();
+        assert!(error_msg.contains("invalid cron"));
+        assert!(error_msg.contains("Expected 6 fields"));
+        assert!(error_msg.contains("Invalid cron expression"));
+    }
+
+    #[test]
+    fn test_cron_error_no_upcoming_execution() {
+        let expression = "0 0 31 2 *"; // Feb 31st (impossible)
+        let error = CronError::NoUpcomingExecution(expression.to_string());
+
+        let error_msg = error.to_string();
+        assert!(error_msg.contains("0 0 31 2 *"));
+        assert!(error_msg.contains("No upcoming execution"));
+    }
+
+    #[test]
+    fn test_cron_error_cron_not_found() {
+        let cron_id = Uuid::now_v7();
+        let error = CronError::CronNotFound {
+            cron_id,
+            expected_type: None,
+        };
+
+        let error_msg = error.to_string();
+        assert!(error_msg.contains(&cron_id.to_string()));
+        assert!(error_msg.contains("not found"));
+        assert!(!error_msg.contains("expected type"));
+
+        // With expected type
+        let error_with_type = CronError::CronNotFound {
+            cron_id,
+            expected_type: Some("MyJob".to_string()),
+        };
+
+        let error_msg = error_with_type.to_string();
+        assert!(error_msg.contains("MyJob"));
+        assert!(error_msg.contains("expected type"));
+    }
+
+    #[test]
+    fn test_cron_error_type_mismatch() {
+        let cron_id = Uuid::now_v7();
+        let error = CronError::TypeMismatch {
+            cron_id,
+            actual_type: "JobA".to_string(),
+            expected_type: "JobB".to_string(),
+        };
+
+        let error_msg = error.to_string();
+        assert!(error_msg.contains(&cron_id.to_string()));
+        assert!(error_msg.contains("JobA"));
+        assert!(error_msg.contains("JobB"));
+        assert!(error_msg.contains("has type"));
+        assert!(error_msg.contains("but expected"));
+    }
+
+    #[test]
+    fn test_cron_error_database_error() {
+        use std::error::Error;
+
+        let anyhow_error = anyhow::anyhow!("Connection failed");
+        let error = CronError::DatabaseError(anyhow_error);
+
+        let error_msg = error.to_string();
+        assert!(error_msg.contains("Database error"));
+        assert!(error_msg.contains("Connection failed"));
+
+        // Check source chain is preserved
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn test_cron_job_serialization() {
+        let now = Utc::now();
+        let cron_job = CronJob {
+            cron_id: "test-cron-123".to_string(),
+            queue: "default".to_string(),
+            type_hash: 12345,
+            type_name: "TestJob".to_string(),
+            payload: json!({"key": "value"}),
+            cron_expression: "0 0 * * *".to_string(),
+            priority: 5,
+            created_at: now,
+            last_enqueued_at: Some(now),
+            next_execution_at: now,
+            enabled: true,
+            max_runs: Some(10),
+            run_count: 3,
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&cron_job).unwrap();
+
+        // Deserialize back
+        let deserialized: CronJob = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.cron_id, cron_job.cron_id);
+        assert_eq!(deserialized.queue, cron_job.queue);
+        assert_eq!(deserialized.type_hash, cron_job.type_hash);
+        assert_eq!(deserialized.type_name, cron_job.type_name);
+        assert_eq!(deserialized.payload, cron_job.payload);
+        assert_eq!(deserialized.cron_expression, cron_job.cron_expression);
+        assert_eq!(deserialized.priority, cron_job.priority);
+        assert_eq!(deserialized.created_at, cron_job.created_at);
+        assert_eq!(deserialized.last_enqueued_at, cron_job.last_enqueued_at);
+        assert_eq!(deserialized.next_execution_at, cron_job.next_execution_at);
+        assert_eq!(deserialized.enabled, cron_job.enabled);
+        assert_eq!(deserialized.max_runs, cron_job.max_runs);
+        assert_eq!(deserialized.run_count, cron_job.run_count);
+    }
+
+    #[test]
+    fn test_cron_job_json_payload() {
+        let now = Utc::now();
+
+        // Test with complex nested JSON payload
+        let complex_payload = json!({
+            "user_id": 42,
+            "nested": {
+                "array": [1, 2, 3],
+                "string": "test"
+            },
+            "null_field": null
+        });
+
+        let cron_job = CronJob {
+            cron_id: "test".to_string(),
+            queue: "default".to_string(),
+            type_hash: 1,
+            type_name: "Test".to_string(),
+            payload: complex_payload.clone(),
+            cron_expression: "* * * * * *".to_string(),
+            priority: 0,
+            created_at: now,
+            last_enqueued_at: None,
+            next_execution_at: now,
+            enabled: true,
+            max_runs: None,
+            run_count: 0,
+        };
+
+        assert_eq!(cron_job.payload, complex_payload);
+        assert_eq!(cron_job.payload["user_id"], 42);
+        assert_eq!(cron_job.payload["nested"]["array"][0], 1);
+    }
+
+    #[test]
+    fn test_cron_job_enabled_flag() {
+        let now = Utc::now();
+
+        // Test enabled = true
+        let enabled_job = CronJob {
+            cron_id: "enabled".to_string(),
+            queue: "default".to_string(),
+            type_hash: 1,
+            type_name: "Test".to_string(),
+            payload: json!({}),
+            cron_expression: "* * * * * *".to_string(),
+            priority: 0,
+            created_at: now,
+            last_enqueued_at: None,
+            next_execution_at: now,
+            enabled: true,
+            max_runs: None,
+            run_count: 0,
+        };
+
+        assert!(enabled_job.enabled);
+
+        // Test enabled = false
+        let disabled_job = CronJob {
+            enabled: false,
+            ..enabled_job.clone()
+        };
+
+        assert!(!disabled_job.enabled);
+    }
+
+    #[test]
+    fn test_cron_job_max_runs() {
+        let now = Utc::now();
+
+        // Test with max_runs = Some(5)
+        let limited_job = CronJob {
+            cron_id: "limited".to_string(),
+            queue: "default".to_string(),
+            type_hash: 1,
+            type_name: "Test".to_string(),
+            payload: json!({}),
+            cron_expression: "* * * * * *".to_string(),
+            priority: 0,
+            created_at: now,
+            last_enqueued_at: None,
+            next_execution_at: now,
+            enabled: true,
+            max_runs: Some(5),
+            run_count: 0,
+        };
+
+        assert_eq!(limited_job.max_runs, Some(5));
+
+        // Test with max_runs = None (unlimited)
+        let unlimited_job = CronJob {
+            max_runs: None,
+            ..limited_job.clone()
+        };
+
+        assert_eq!(unlimited_job.max_runs, None);
+    }
+
+    #[test]
+    fn test_cron_job_run_count() {
+        let now = Utc::now();
+
+        let job = CronJob {
+            cron_id: "counter".to_string(),
+            queue: "default".to_string(),
+            type_hash: 1,
+            type_name: "Test".to_string(),
+            payload: json!({}),
+            cron_expression: "* * * * * *".to_string(),
+            priority: 0,
+            created_at: now,
+            last_enqueued_at: None,
+            next_execution_at: now,
+            enabled: true,
+            max_runs: Some(10),
+            run_count: 0,
+        };
+
+        assert_eq!(job.run_count, 0);
+
+        // Simulate incrementing run count
+        let job_after_one_run = CronJob {
+            run_count: 1,
+            ..job.clone()
+        };
+        assert_eq!(job_after_one_run.run_count, 1);
+
+        let job_after_five_runs = CronJob {
+            run_count: 5,
+            ..job.clone()
+        };
+        assert_eq!(job_after_five_runs.run_count, 5);
+
+        // Test reaching max_runs
+        let job_at_limit = CronJob {
+            run_count: 10,
+            max_runs: Some(10),
+            ..job.clone()
+        };
+        assert_eq!(job_at_limit.run_count, job_at_limit.max_runs.unwrap());
+    }
 }

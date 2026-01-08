@@ -1,15 +1,16 @@
 use crate::job_handle::SqliteJobHandle;
 use crate::types::JobRow;
 use aide_de_camp::core::job_processor::JobProcessor;
-use aide_de_camp::core::queue::{Queue, QueueError};
-use aide_de_camp::core::{new_xid, DateTime, Xid};
+use aide_de_camp::core::queue::{InternalQueue, Queue, QueueError, ScheduleOptions};
+use aide_de_camp::core::DateTime;
 use anyhow::Context;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, SqlitePool};
 use tracing::instrument;
+use uuid::Uuid;
 
-/// An implementation of the Queue backed by SQlite
+/// An implementation of the Queue backed by SQLite
 #[derive(Clone)]
 pub struct SqliteQueue {
     pub(crate) pool: SqlitePool,
@@ -25,90 +26,68 @@ impl SqliteQueue {
 impl Queue for SqliteQueue {
     type JobHandle = SqliteJobHandle;
 
-    #[instrument(skip_all, err, ret, fields(job_type = J::name(), payload_size))]
-    async fn schedule_at<J>(
+    #[instrument(skip_all, err, ret, fields(type_name = J::type_name(), type_hash = J::type_hash()))]
+    async fn schedule<J>(
         &self,
         payload: J::Payload,
-        scheduled_at: DateTime,
-        priority: i8,
-    ) -> Result<Xid, QueueError>
+        options: ScheduleOptions,
+    ) -> Result<Uuid, QueueError>
     where
         J: JobProcessor + 'static,
-        J::Payload: Serialize,
+        J::Payload: Serialize + for<'de> Deserialize<'de>,
     {
-        let payload = serde_json::to_vec(&payload).map_err(QueueError::SerializeError)?;
-        let jid = new_xid();
-        let jid_string = jid.to_string();
-        let job_type = J::name();
+        let type_hash = J::type_hash();
+        let type_name = J::type_name();
+        let payload_value = serde_json::to_value(&payload)
+            .map_err(|e| QueueError::serialize_error(type_name.to_string(), e))?;
 
-        tracing::Span::current().record("payload_size", payload.len());
+        let jid = Uuid::now_v7();
+        let jid_bytes = jid.as_bytes().to_vec();
+        let payload_text = serde_json::to_string(&payload_value)
+            .map_err(|e| QueueError::serialize_error(type_name.to_string(), e))?;
+        let priority_i16 = options.priority() as i16;
 
         sqlx::query(
-            "INSERT INTO adc_queue (jid,job_type,payload,scheduled_at,priority) VALUES (?1,?2,?3,?4,?5)"
+            "INSERT INTO adc_queue_v2 (jid, type_hash, type_name, payload, scheduled_at, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
-        .bind(jid_string)
-        .bind(job_type)
-        .bind(payload)
-        .bind(scheduled_at)
-        .bind(priority)
+        .bind(jid_bytes)
+        .bind(type_hash as i64)
+        .bind(type_name)
+        .bind(payload_text)
+        .bind(options.scheduled_at().timestamp_millis())
+        .bind(priority_i16)
         .execute(&self.pool)
         .await
         .context("Failed to add job to the queue")?;
-        Ok(jid)
-    }
 
-    #[instrument(skip_all, err, ret, fields(job_type))]
-    async fn schedule_raw(
-        &self,
-        job_type: &str,
-        payload: serde_json::Value,
-        scheduled_at: DateTime,
-        priority: i8,
-    ) -> Result<Xid, QueueError> {
-        let jid = new_xid();
-        let jid_string = jid.to_string();
-
-        // Serialize JSON to bytes for BLOB storage
-        let payload_bytes = serde_json::to_vec(&payload).map_err(QueueError::SerializeError)?;
-
-        tracing::Span::current().record("job_type", job_type);
-
-        sqlx::query(
-            "INSERT INTO adc_queue (jid,job_type,payload,scheduled_at,priority) VALUES (?1,?2,?3,?4,?5)"
-        )
-        .bind(jid_string)
-        .bind(job_type)
-        .bind(payload_bytes)
-        .bind(scheduled_at)
-        .bind(priority)
-        .execute(&self.pool)
-        .await
-        .context("Failed to add job to the queue")?;
         Ok(jid)
     }
 
     #[instrument(skip_all, err)]
-    async fn poll_next_with_instant(
+    async fn poll_next(
         &self,
-        job_types: &[&str],
+        type_hashes: &[u64],
         now: DateTime,
     ) -> Result<Option<SqliteJobHandle>, QueueError> {
+        let type_hashes_i64: Vec<i64> = type_hashes.iter().map(|&h| h as i64).collect();
+
         let mut builder =
-            QueryBuilder::new("UPDATE adc_queue SET started_at=(strftime('%s', 'now')) ");
+            QueryBuilder::new("UPDATE adc_queue_v2 SET started_at=(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ");
         let query = {
             builder.push(
-                "WHERE jid IN (SELECT jid FROM adc_queue WHERE started_at IS NULL AND queue='default' AND scheduled_at <="
+                "WHERE jid IN (SELECT jid FROM adc_queue_v2 WHERE started_at IS NULL AND queue='default' AND scheduled_at <="
             );
-            builder.push_bind(now);
-            builder.push(" AND job_type IN (");
+            builder.push_bind(now.timestamp_millis());
+            builder.push(" AND type_hash IN (");
             {
                 let mut separated = builder.separated(",");
-                for job_type in job_types {
-                    separated.push_bind(job_type);
+                for &type_hash in &type_hashes_i64 {
+                    separated.push_bind(type_hash);
                 }
             }
-            builder.push(") ORDER BY priority DESC LIMIT 1) RETURNING *");
-            builder.build().bind(now)
+            builder.push(") ORDER BY priority DESC, scheduled_at ASC LIMIT 1) RETURNING *");
+            builder.build()
         };
         let row = query
             .try_map(|row| JobRow::from_row(&row))
@@ -124,39 +103,79 @@ impl Queue for SqliteQueue {
     }
 
     #[instrument(skip_all, err)]
-    async fn cancel_job(&self, job_id: Xid) -> Result<(), QueueError> {
-        let jid = job_id.to_string();
-        let result = sqlx::query("DELETE FROM adc_queue WHERE started_at IS NULL and jid = ?")
-            .bind(jid)
+    async fn cancel_job(&self, job_id: Uuid) -> Result<bool, QueueError> {
+        let jid_bytes = job_id.as_bytes().to_vec();
+        let result = sqlx::query("DELETE FROM adc_queue_v2 WHERE started_at IS NULL AND jid = ?")
+            .bind(jid_bytes)
             .execute(&self.pool)
             .await
             .context("Failed to remove job from the queue")?;
-        if result.rows_affected() == 0 {
-            Err(QueueError::JobNotFound(job_id))
-        } else {
-            Ok(())
-        }
+        Ok(result.rows_affected() > 0)
     }
 
     #[allow(clippy::or_fun_call)]
     #[instrument(skip_all, err)]
-    async fn unschedule_job<J>(&self, job_id: Xid) -> Result<J::Payload, QueueError>
+    async fn unschedule_job<J>(&self, job_id: Uuid) -> Result<J::Payload, QueueError>
     where
         J: JobProcessor + 'static,
         J::Payload: for<'de> Deserialize<'de>,
     {
-        let jid = job_id.to_string();
-        let job_type = J::name();
-        let payload = sqlx::query_scalar::<_, Vec<u8>>(
-            "DELETE FROM adc_queue WHERE started_at IS NULL and jid = ? AND job_type = ? RETURNING payload"
+        let jid_bytes = job_id.as_bytes().to_vec();
+        let type_hash = J::type_hash() as i64;
+        let type_name = J::type_name();
+
+        let payload = sqlx::query_scalar::<_, String>(
+            "DELETE FROM adc_queue_v2 WHERE started_at IS NULL AND jid = ? AND type_hash = ? RETURNING payload"
         )
-        .bind(jid)
-        .bind(job_type)
+        .bind(jid_bytes)
+        .bind(type_hash)
         .fetch_optional(&self.pool)
         .await
         .context("Failed to remove job from the queue")?
-        .ok_or(QueueError::JobNotFound(job_id))?;
-        let decoded = serde_json::from_slice(&payload).map_err(QueueError::DeserializeError)?;
+        .ok_or_else(|| QueueError::job_not_found_with_type(job_id, type_name.to_string()))?;
+
+        let payload_bytes = payload.as_bytes();
+        let payload_value: serde_json::Value = serde_json::from_str(&payload).map_err(|e| {
+            QueueError::deserialize_error(job_id, type_name.to_string(), payload_bytes, e)
+        })?;
+
+        let decoded = serde_json::from_value(payload_value).map_err(|e| {
+            QueueError::deserialize_error(job_id, type_name.to_string(), payload_bytes, e)
+        })?;
         Ok(decoded)
+    }
+}
+
+#[async_trait]
+impl InternalQueue for SqliteQueue {
+    #[instrument(skip_all, err, ret, fields(type_name = %type_name, type_hash = %type_hash))]
+    async fn schedule_untyped(
+        &self,
+        type_hash: u64,
+        type_name: &str,
+        payload: serde_json::Value,
+        options: ScheduleOptions,
+    ) -> Result<Uuid, QueueError> {
+        let jid = Uuid::now_v7();
+        let jid_bytes = jid.as_bytes().to_vec();
+        let payload_text = serde_json::to_string(&payload)
+            .map_err(|e| QueueError::serialize_error(type_name.to_string(), e))?;
+        let priority_i16 = options.priority() as i16;
+
+        sqlx::query(
+            "INSERT INTO adc_queue_v2 (jid, type_hash, type_name, payload, scheduled_at, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(jid_bytes)
+        .bind(type_hash as i64)
+        .bind(type_name)
+        .bind(payload_text)
+        .bind(options.scheduled_at().timestamp_millis())
+        .bind(priority_i16)
+        .execute(&self.pool)
+        .await
+        .context("Failed to add job to the queue")?;
+
+        Ok(jid)
     }
 }
