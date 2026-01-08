@@ -184,12 +184,16 @@ mod test {
 
     #[async_trait]
     impl JobHandle for TestHandle {
-        fn id(&self) -> Xid {
-            xid::new()
+        fn id(&self) -> uuid::Uuid {
+            uuid::Uuid::now_v7()
         }
 
-        fn job_type(&self) -> &str {
-            "test"
+        fn type_hash(&self) -> u64 {
+            TestJobProcessor::type_hash()
+        }
+
+        fn type_name(&self) -> &str {
+            TestJobProcessor::type_name()
         }
 
         fn payload(&self) -> Bytes {
@@ -201,18 +205,21 @@ mod test {
             0
         }
 
-        async fn complete(mut self) -> Result<(), QueueError> {
+        async fn complete(self) -> Result<(), QueueError> {
             tokio::time::sleep(self.complete_delay).await;
             self.completed.store(true, Ordering::SeqCst);
             Ok(())
         }
 
-        async fn fail(mut self) -> Result<(), QueueError> {
+        async fn fail(self) -> Result<(), QueueError> {
             self.failed.store(true, Ordering::SeqCst);
             Ok(())
         }
 
-        async fn dead_queue(mut self) -> Result<(), QueueError> {
+        async fn dead_queue(
+            self,
+            _error_context: Option<crate::core::job_handle::ErrorContext>,
+        ) -> Result<(), QueueError> {
             self.dead_queue.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -221,38 +228,43 @@ mod test {
     #[derive(Default)]
     struct TestQueue {
         test_handle: Option<TestHandle>,
+        polled: Arc<AtomicBool>,
     }
 
     #[async_trait]
     impl Queue for TestQueue {
         type JobHandle = TestHandle;
 
-        async fn schedule_at<J>(
+        async fn schedule<J>(
             &self,
             _payload: J::Payload,
-            _scheduled_at: DateTime,
-            _priority: i8,
-        ) -> Result<Xid, QueueError>
+            _options: crate::core::queue::ScheduleOptions,
+        ) -> Result<uuid::Uuid, QueueError>
         where
             J: JobProcessor + 'static,
-            J::Payload: Serialize,
+            J::Payload: Serialize + for<'de> Deserialize<'de>,
         {
-            Ok(xid::new())
+            Ok(uuid::Uuid::now_v7())
         }
 
-        async fn poll_next_with_instant(
+        async fn poll_next(
             &self,
-            _job_types: &[&str],
+            _type_hashes: &[u64],
             _now: DateTime,
         ) -> Result<Option<Self::JobHandle>, QueueError> {
-            Ok(self.test_handle.clone())
+            // Only return the job once
+            if self.polled.swap(true, Ordering::SeqCst) {
+                Ok(None)
+            } else {
+                Ok(self.test_handle.clone())
+            }
         }
 
-        async fn cancel_job(&self, _job_id: Xid) -> Result<(), QueueError> {
-            Ok(())
+        async fn cancel_job(&self, _job_id: uuid::Uuid) -> Result<bool, QueueError> {
+            Ok(true)
         }
 
-        async fn unschedule_job<J>(&self, job_id: Xid) -> Result<J::Payload, QueueError>
+        async fn unschedule_job<J>(&self, job_id: uuid::Uuid) -> Result<J::Payload, QueueError>
         where
             J: JobProcessor + 'static,
             J::Payload: for<'de> Deserialize<'de>,
@@ -260,11 +272,12 @@ mod test {
             match &self.test_handle {
                 Some(handle) => {
                     let payload = handle.payload();
-                    let decoded =
-                        serde_json::from_slice(&payload).map_err(QueueError::DeserializeError)?;
+                    let decoded = serde_json::from_slice(&payload).map_err(|e| {
+                        QueueError::deserialize_error(job_id, "test".to_string(), &payload, e)
+                    })?;
                     Ok(decoded)
                 }
-                None => Err(QueueError::JobNotFound(job_id)),
+                None => Err(QueueError::job_not_found(job_id)),
             }
         }
     }
@@ -288,14 +301,20 @@ mod test {
         }
     }
 
+    impl crate::core::job_type_id::JobTypeId for TestJobProcessor {
+        fn type_name() -> &'static str {
+            "test::TestJobProcessor"
+        }
+    }
+
     #[async_trait]
     impl JobProcessor for TestJobProcessor {
         type Payload = ();
-        type Error = anyhow::Error;
+        type Error = std::convert::Infallible;
 
         async fn handle(
             &self,
-            _jid: Xid,
+            _jid: uuid::Uuid,
             _payload: Self::Payload,
             cancellation_token: CancellationToken,
         ) -> Result<(), Self::Error> {
@@ -309,10 +328,6 @@ mod test {
 
             self.running.store(false, Ordering::SeqCst);
             Ok(())
-        }
-
-        fn name() -> &'static str {
-            "test"
         }
 
         fn shutdown_timeout(&self) -> std::time::Duration {
@@ -349,6 +364,7 @@ mod test {
         router.add_job_handler(processor);
         let queue = TestQueue {
             test_handle: Some(handle),
+            polled: Arc::new(AtomicBool::new(false)),
         };
         let runner = JobRunner::new(queue, router, 1, options);
 
